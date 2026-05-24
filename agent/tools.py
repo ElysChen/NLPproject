@@ -365,3 +365,123 @@ def get_research_tool_specs_and_registry(
         "find_in_document": find_in_document,
         "collect_evidence_snippets": collect_evidence_snippets,
     }
+
+
+def make_initial_search_queries(question: str, max_queries: int = 4, max_query_chars: int = 260) -> List[str]:
+    text = " ".join(str(question or "").split())
+    if not text:
+        return []
+
+    queries = []
+
+    def add_query(query: str) -> None:
+        query = " ".join(str(query or "").split()).strip(" ,.;:")
+        if not query:
+            return
+        if len(query) > max_query_chars:
+            query = query[:max_query_chars].rstrip()
+        key = query.lower()
+        if key not in {item.lower() for item in queries}:
+            queries.append(query)
+
+    quoted_phrases = []
+    for marker in ('"', "'", "“", "”"):
+        if marker in text:
+            break
+    for piece in text.replace("“", '"').replace("”", '"').split('"')[1::2]:
+        if 2 <= len(piece.split()) <= 12:
+            quoted_phrases.append(piece)
+
+    year_tokens = []
+    current = []
+    for ch in text:
+        if ch.isdigit():
+            current.append(ch)
+        elif current:
+            token = "".join(current)
+            if len(token) == 4:
+                year_tokens.append(token)
+            current = []
+    if current:
+        token = "".join(current)
+        if len(token) == 4:
+            year_tokens.append(token)
+
+    long_words = []
+    for raw in text.replace("/", " ").replace("-", " ").split():
+        word = raw.strip(".,;:!?()[]{}\"'")
+        if len(word) >= 7 and any(ch.isalpha() for ch in word):
+            long_words.append(word)
+
+    add_query(text)
+    if quoted_phrases:
+        add_query(" ".join(quoted_phrases[:4] + year_tokens[:4]))
+    if long_words:
+        add_query(" ".join(long_words[:18] + year_tokens[:4]))
+    if len(text) > max_query_chars:
+        add_query(text[:max_query_chars])
+
+    return queries[:max_queries]
+
+
+def get_v3_research_tool_specs_and_registry(
+    searcher: BrowseCompBM25Searcher,
+    k: int = 8,
+    snippet_max_chars: int = 1400,
+    document_window_chars: int = 2200,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Callable[..., Any]]]:
+    tools, registry = get_research_tool_specs_and_registry(
+        searcher=searcher,
+        k=k,
+        snippet_max_chars=snippet_max_chars,
+        document_window_chars=document_window_chars,
+    )
+
+    def search_many(queries: List[str], per_query_k: int = 5) -> List[Dict[str, Any]]:
+        results = []
+        seen_docids = set()
+        for query in [str(item).strip() for item in queries][:6]:
+            if not query:
+                continue
+            for item in retrieve_once(
+                searcher=searcher,
+                query=query,
+                k=int(per_query_k or 5),
+                snippet_max_chars=snippet_max_chars,
+            ):
+                docid = str(item.get("docid", ""))
+                if not docid or docid in seen_docids:
+                    continue
+                seen_docids.add(docid)
+                with_query = dict(item)
+                with_query["query"] = query
+                results.append(with_query)
+        return results
+
+    search_many_spec = {
+        "type": "function",
+        "function": {
+            "name": "search_many",
+            "description": (
+                "Run several focused BrowseComp-Plus BM25 searches and return a deduplicated list "
+                "of results with query, docid, score, url, and snippet."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "queries": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Focused search queries",
+                    },
+                    "per_query_k": {
+                        "type": "integer",
+                        "description": "Maximum results to return for each query",
+                    },
+                },
+                "required": ["queries"],
+            },
+        },
+    }
+
+    return tools + [search_many_spec], {**registry, "search_many": search_many}
