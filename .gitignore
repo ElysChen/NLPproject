@@ -10,7 +10,7 @@ env/
 data/
 datasets/
 outputs/
-runs/
+# runs/
 wandb/
 checkpoints/
 
